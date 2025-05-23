@@ -7,6 +7,20 @@
                 <div class="flex gap-2 items-end">
                     <x-forms.input required id="repository_url" label="Repository URL (https://)"
                         helper="{!! __('repository.url') !!}" />
+                </div>
+                <div class="flex flex-col gap-2">
+                    <x-forms.select wire:model.live="git_auth_type" label="Authentication Type">
+                        <option value="none">Public (no authentication)</option>
+                        <option value="http_basic">HTTP/S Basic Auth (username/password)</option>
+                    </x-forms.select>
+                    @if ($git_auth_type === 'http_basic')
+                        <div class="flex flex-col gap-2 xl:flex-row">
+                            <x-forms.input wire:model="git_http_username" id="git_http_username" label="Git Username" required />
+                            <x-forms.input wire:model="git_http_password" id="git_http_password" type="password" label="Git Password" required />
+                        </div>
+                    @endif
+                </div>
+                <div class="flex items-end gap-2">
                     <x-forms.button type="submit">
                         Check repository
                     </x-forms.button>

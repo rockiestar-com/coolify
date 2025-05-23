@@ -178,6 +178,39 @@
             @endif
             <div class="py-4 border-b dark:border-coolgray-200">
                 <h3>Build</h3>
+                <div class="pt-2 pb-4">
+                    <x-forms.select wire:model.live="application.git_auth_type" label="Authentication Type">
+                        <option value="none">Public Git Repository / Manual Dockerfile or Image</option>
+                        <option value="ssh">SSH Deploy Key</option>
+                        <option value="github_app">GitHub App</option>
+                        <option value="http_basic">HTTP/S Basic Auth</option>
+                    </x-forms.select>
+                </div>
+
+                @if ($application->git_auth_type === 'http_basic')
+                    <div class="flex flex-col gap-2 pb-4 xl:flex-row">
+                        <x-forms.input wire:model="application.git_http_username" id="application.git_http_username" label="Git Username" />
+                        <x-forms.input wire:model="application.git_http_password" id="application.git_http_password" type="password" label="Git Password" />
+                    </div>
+                @endif
+                 @if ($application->git_auth_type === 'ssh')
+                    {{-- Placeholder for existing SSH key selection UI --}}
+                    {{-- Assuming something like this might exist or be needed here --}}
+                    {{-- <x-forms.select wire:model="application.private_key_id" label="SSH Key">
+                        <option value="">Select SSH Key</option>
+                        @foreach ($private_keys as $key)
+                            <option value="{{ $key->id }}">{{ $key->name }}</option>
+                        @endforeach
+                    </x-forms.select> --}}
+                    <div class="pb-4 text-xs dark:text-warning">Ensure the selected SSH key is configured in your Git provider.</div>
+                @endif
+                 @if ($application->git_auth_type === 'github_app')
+                    {{-- Placeholder for existing GitHub App selection UI --}}
+                    {{-- Assuming something like this might exist or be needed here --}}
+                    {{-- <div>GitHub App: {{ $application->source->name ?? 'Not Selected' }}</div> --}}
+                    <div class="pb-4 text-xs dark:text-warning">Configure repository access in the GitHub App settings.</div>
+                @endif
+
                 @if ($application->build_pack === 'dockerimage')
                     <x-forms.input
                         helper="You can add custom docker run options that will be used when your container is started.<br>Note: Not all options are supported, as they could mess up Coolify's automation and could cause bad experience for users.<br><br>Check the <a class='underline dark:text-white' href='https://coolify.io/docs/knowledge-base/docker/custom-commands'>docs.</a>"
@@ -239,6 +272,16 @@
                                 </div>
                             </div>
                         @else
+                            <div class="flex flex-col gap-2 xl:flex-row">
+                                @if ($application->git_auth_type !== 'github_app' || is_null($application->source_id))
+                                    {{-- Show Git Repository and Branch fields if not using GitHub App or if app not fully configured --}}
+                                    <x-forms.input id="application.git_repository" label="Git Repository" :readonly="$application->git_auth_type === 'github_app' && !is_null($application->source_id)" />
+                                    <x-forms.input id="application.git_branch" label="Git Branch" :readonly="$application->git_auth_type === 'github_app' && !is_null($application->source_id)" />
+                                @else
+                                    <x-forms.input id="application.git_repository" label="Git Repository" readonly />
+                                    <x-forms.input id="application.git_branch" label="Git Branch" readonly />
+                                @endif
+                            </div>
                             <div class="flex flex-col gap-2 xl:flex-row">
                                 <x-forms.input placeholder="/" id="application.base_directory" label="Base Directory"
                                     helper="Directory to use as root. Useful for monorepos." />

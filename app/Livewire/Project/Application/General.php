@@ -56,10 +56,13 @@ class General extends Component
         'application.name' => 'required',
         'application.description' => 'nullable',
         'application.fqdn' => 'nullable',
-        'application.git_repository' => 'required',
-        'application.git_branch' => 'required',
+        'application.git_repository' => 'required_if:application.git_auth_type,http_basic|required_if:application.git_auth_type,ssh|required_if:application.git_auth_type,none|url|nullable',
+        'application.git_branch' => 'required_if:application.git_auth_type,http_basic|required_if:application.git_auth_type,ssh|required_if:application.git_auth_type,none|nullable',
         'application.git_commit_sha' => 'nullable',
         'application.install_command' => 'nullable',
+        'application.git_auth_type' => 'required|string|in:ssh,github_app,http_basic,none',
+        'application.git_http_username' => 'nullable|required_if:application.git_auth_type,http_basic|string',
+        'application.git_http_password' => 'nullable|required_if:application.git_auth_type,http_basic|string',
         'application.build_command' => 'nullable',
         'application.start_command' => 'nullable',
         'application.build_pack' => 'required',
@@ -107,6 +110,9 @@ class General extends Component
         'application.git_branch' => 'Git branch',
         'application.git_commit_sha' => 'Git commit SHA',
         'application.install_command' => 'Install command',
+        'application.git_auth_type' => 'Git Authentication Type',
+        'application.git_http_username' => 'Git HTTP Username',
+        'application.git_http_password' => 'Git HTTP Password',
         'application.build_command' => 'Build command',
         'application.start_command' => 'Start command',
         'application.build_pack' => 'Build pack',
@@ -365,6 +371,41 @@ class General extends Component
     public function submit($showToaster = true)
     {
         try {
+            if ($this->application->isDirty('git_auth_type')) {
+                switch ($this->application->git_auth_type) {
+                    case 'ssh':
+                        $this->application->source_id = null;
+                        $this->application->source_type = null;
+                        $this->application->git_http_username = null;
+                        $this->application->git_http_password = null;
+                        break;
+                    case 'github_app':
+                        $this->application->private_key_id = null;
+                        $this->application->git_http_username = null;
+                        $this->application->git_http_password = null;
+                        // Ensure git_repository and git_branch are not nulled if derived from GitHub App
+                        break;
+                    case 'http_basic':
+                        $this->application->private_key_id = null;
+                        $this->application->source_id = null;
+                        $this->application->source_type = null;
+                        break;
+                    case 'none':
+                        // For 'none', decide if you want to clear all git related fields or keep them
+                        // if user might switch back. For now, let's clear them if they are not relevant
+                        // to a manual Dockerfile/image build without git.
+                        // If 'none' means "no git auth but still use git repo URL", then don't nullify these.
+                        // Based on previous task, 'none' can still mean a public git repo.
+                        // So, we only nullify specific auth method fields.
+                        $this->application->private_key_id = null;
+                        $this->application->source_id = null;
+                        $this->application->source_type = null;
+                        $this->application->git_http_username = null;
+                        $this->application->git_http_password = null;
+                        break;
+                }
+            }
+
             $this->application->fqdn = str($this->application->fqdn)->replaceEnd(',', '')->trim();
             $this->application->fqdn = str($this->application->fqdn)->replaceStart(',', '')->trim();
             $this->application->fqdn = str($this->application->fqdn)->trim()->explode(',')->map(function ($domain) {

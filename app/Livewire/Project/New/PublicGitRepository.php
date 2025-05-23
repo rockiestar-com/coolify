@@ -61,6 +61,10 @@ class PublicGitRepository extends Component
 
     public bool $new_compose_services = false;
 
+    public string $git_auth_type = 'none';
+    public ?string $git_http_username = null;
+    public ?string $git_http_password = null;
+
     protected $rules = [
         'repository_url' => 'required|url',
         'port' => 'required|numeric',
@@ -69,6 +73,9 @@ class PublicGitRepository extends Component
         'build_pack' => 'required|string',
         'base_directory' => 'nullable|string',
         'docker_compose_location' => 'nullable|string',
+        'git_auth_type' => 'required|string|in:none,http_basic',
+        'git_http_username' => 'nullable|required_if:git_auth_type,http_basic|string',
+        'git_http_password' => 'nullable|required_if:git_auth_type,http_basic|string',
     ];
 
     protected $validationAttributes = [
@@ -79,6 +86,9 @@ class PublicGitRepository extends Component
         'build_pack' => 'build pack',
         'base_directory' => 'base directory',
         'docker_compose_location' => 'docker compose location',
+        'git_auth_type' => 'authentication type',
+        'git_http_username' => 'Git username',
+        'git_http_password' => 'Git password',
     ];
 
     public function mount()
@@ -218,12 +228,12 @@ class PublicGitRepository extends Component
 
     private function getBranch()
     {
-        if ($this->git_source === 'other') {
+        if ($this->git_source === 'other' || $this->git_auth_type === 'http_basic') {
             $this->branchFound = true;
 
             return;
         }
-        if ($this->git_source->getMorphClass() === \App\Models\GithubApp::class) {
+        if ($this->git_source instanceof GithubApp && $this->git_source->getMorphClass() === \App\Models\GithubApp::class) {
             ['rate_limit_remaining' => $this->rate_limit_remaining, 'rate_limit_reset' => $this->rate_limit_reset] = githubApi(source: $this->git_source, endpoint: "/repos/{$this->git_repository}/branches/{$this->git_branch}");
             $this->rate_limit_reset = Carbon::parse((int) $this->rate_limit_reset)->format('Y-M-d H:i:s');
             $this->branchFound = true;
@@ -282,6 +292,7 @@ class PublicGitRepository extends Component
                     'name' => generate_random_name(),
                     'git_repository' => $this->git_repository,
                     'git_branch' => $this->git_branch,
+                    'git_auth_type' => $this->git_auth_type,
                     'ports_exposes' => $this->port,
                     'publish_directory' => $this->publish_directory,
                     'environment_id' => $environment->id,
@@ -295,6 +306,7 @@ class PublicGitRepository extends Component
                     'name' => generate_application_name($this->git_repository, $this->git_branch),
                     'git_repository' => $this->git_repository,
                     'git_branch' => $this->git_branch,
+                    'git_auth_type' => $this->git_auth_type,
                     'ports_exposes' => $this->port,
                     'publish_directory' => $this->publish_directory,
                     'environment_id' => $environment->id,
@@ -305,6 +317,10 @@ class PublicGitRepository extends Component
                     'build_pack' => $this->build_pack,
                     'base_directory' => $this->base_directory,
                 ];
+            }
+            if ($this->git_auth_type === 'http_basic') {
+                $application_init['git_http_username'] = $this->git_http_username;
+                $application_init['git_http_password'] = $this->git_http_password;
             }
 
             if ($this->build_pack === 'dockerfile' || $this->build_pack === 'dockerimage') {

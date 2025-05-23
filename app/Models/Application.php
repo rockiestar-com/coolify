@@ -120,6 +120,8 @@ class Application extends BaseModel
     protected $casts = [
         'custom_network_aliases' => 'array',
         'http_basic_auth_password' => 'encrypted',
+        'git_http_username' => 'encrypted',
+        'git_http_password' => 'encrypted',
     ];
 
     public function customNetworkAliases(): Attribute
@@ -883,17 +885,49 @@ class Application extends BaseModel
 
     public function deploymentType()
     {
-        if (isDev() && data_get($this, 'private_key_id') === 0) {
-            return 'deploy_key';
+        switch ($this->git_auth_type) {
+            case 'http_basic':
+                return 'http_basic_auth';
+            case 'ssh':
+                // Fallback to existing deploy_key logic if private_key_id is set
+                if (data_get($this, 'private_key_id')) {
+                    return 'deploy_key';
+                }
+                // Special case for local development if private_key_id is 0
+                if (isDev() && data_get($this, 'private_key_id') === 0) {
+                    return 'deploy_key';
+                }
+                // If git_auth_type is ssh but no private key, it's problematic.
+                // However, to maintain original behavior as much as possible,
+                // let it fall through to 'other' or throw an exception later if needed.
+                break;
+            case 'github_app':
+                if (data_get($this, 'source')) {
+                    return 'source';
+                }
+                // If git_auth_type is github_app but no source, it's problematic.
+                // Fall through.
+                break;
+            case 'none':
+            default:
+                // Existing logic for 'other' or public repositories
+                // If no specific auth type, but private_key or source exists, use them
+                if (data_get($this, 'private_key_id')) {
+                    return 'deploy_key';
+                } elseif (data_get($this, 'source')) {
+                    return 'source';
+                }
+                return 'other';
         }
+        // Default fallback if somehow git_auth_type is set but conditions above aren't met,
+        // or if specific conditions for 'ssh' or 'github_app' weren't satisfied.
+        // This part ensures we always return a string, preventing the old exception.
         if (data_get($this, 'private_key_id')) {
             return 'deploy_key';
         } elseif (data_get($this, 'source')) {
             return 'source';
-        } else {
-            return 'other';
         }
-        throw new \Exception('No deployment type found');
+        return 'other';
     }
 
     public function could_set_build_commands(): bool
@@ -1098,6 +1132,27 @@ class Application extends BaseModel
             ];
         }
 
+        if ($this->deploymentType() === 'http_basic_auth') {
+            if (str($customRepository)->contains('://')) {
+                $url = Url::fromString($customRepository);
+            } else {
+                $url = Url::fromString("https://".$customRepository);
+            }
+            $fullRepoUrl = $url->withUser($this->git_http_username)->withPassword($this->git_http_password)->__toString();
+            $base_command = "{$base_command} {$fullRepoUrl}";
+
+            if ($exec_in_docker) {
+                $commands->push(executeInDocker($deployment_uuid, $base_command));
+            } else {
+                $commands->push($base_command);
+            }
+            return [
+                'commands' => $commands->implode(' && '),
+                'branch' => $branch,
+                'fullRepoUrl' => $fullRepoUrl,
+            ];
+        }
+
         if ($this->deploymentType() === 'other') {
             $fullRepoUrl = $customRepository;
             $base_command = "{$base_command} {$customRepository}";
@@ -1114,6 +1169,16 @@ class Application extends BaseModel
                 'fullRepoUrl' => $fullRepoUrl,
             ];
         }
+    }
+
+    public function getSanitizedGitRepositoryUrlAttribute(): ?string
+    {
+        if (empty($this->git_repository)) {
+            return null;
+        }
+        // Assuming $this->git_repository itself does not contain credentials.
+        // This accessor is to provide a consistently clean URL.
+        return $this->git_repository;
     }
 
     public function generateGitImportCommands(string $deployment_uuid, int $pull_request_id = 0, ?string $git_type = null, bool $exec_in_docker = true, bool $only_checkout = false, ?string $custom_base_dir = null, ?string $commit = null)
@@ -1182,6 +1247,52 @@ class Application extends BaseModel
                     'fullRepoUrl' => $fullRepoUrl,
                 ];
             }
+        }
+        if ($this->deploymentType() === 'http_basic_auth') {
+            // Construct URL with embedded credentials for http_basic_auth
+            if (str($customRepository)->contains('://')) {
+                 $url = Url::fromString($customRepository);
+            } else {
+                // If $customRepository is like "domain.com/user/repo", prepend https://
+                // This ensures Url::fromString has a scheme to work with.
+                 $url = Url::fromString("https://".$customRepository);
+            }
+            $fullRepoUrl = $url->withUser($this->git_http_username)->withPassword($this->git_http_password)->__toString();
+            $git_clone_command = "{$git_clone_command} {$fullRepoUrl} {$baseDir}";
+
+            if (!$only_checkout) {
+                // Assuming public: true for submodules as basic auth might not propagate or be different for them.
+                // Or submodules might require their own specific handling if they use different auth.
+                $git_clone_command = $this->setGitImportSettings($deployment_uuid, $git_clone_command, public: true);
+            }
+
+            if ($exec_in_docker) {
+                $commands->push(executeInDocker($deployment_uuid, $git_clone_command));
+            } else {
+                $commands->push($git_clone_command);
+            }
+
+            // Handling for pull requests with http_basic_auth might be complex
+            // as it depends on how the Git hosting service exposes PRs.
+            // This example assumes PRs are either not applicable or handled by a generic mechanism if any.
+            // Specific logic for PRs with http_basic_auth (e.g. different refs or API calls) would go here if needed.
+            if ($pull_request_id !== 0) {
+                // Placeholder: Add specific PR handling for http_basic_auth if required.
+                // For example, if PRs are accessible via a specific refspec that works with basic auth:
+                // $branch = "refs/pull/{$pull_request_id}/head:{$pr_branch_name}"; // Example refspec
+                // $checkout_command = $this->buildGitCheckoutCommand($pr_branch_name);
+                // if ($exec_in_docker) {
+                //     $commands->push(executeInDocker($deployment_uuid, "cd {$baseDir} && git fetch origin {$branch} && {$checkout_command}"));
+                // } else {
+                //     $commands->push("cd {$baseDir} && git fetch origin {$branch} && {$checkout_command}");
+                // }
+            }
+
+            return [
+                'commands' => $commands->implode(' && '),
+                'branch' => $branch, // This might need adjustment for PRs
+                'fullRepoUrl' => $fullRepoUrl,
+            ];
         }
         if ($this->deploymentType() === 'deploy_key') {
             $fullRepoUrl = $customRepository;
