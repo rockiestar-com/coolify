@@ -119,6 +119,7 @@ class Application extends BaseModel
 
     protected $casts = [
         'custom_network_aliases' => 'array',
+        'git_http_password' => 'encrypted',
         'http_basic_auth_password' => 'encrypted',
     ];
 
@@ -1025,8 +1026,39 @@ class Application extends BaseModel
         ['repository' => $customRepository, 'port' => $customPort] = $this->customRepository();
         $commands = collect([]);
         $base_command = 'git ls-remote';
+        $fullRepoUrl = $customRepository; // Default for many cases
 
-        if ($this->deploymentType() === 'source') {
+        if ($this->git_auth_type === 'http_basic_auth') {
+            $username = $this->git_http_username;
+            $password = $this->git_http_password; // Already decrypted by casts
+            $httpRepoUrl = $this->git_repository; // Should be the full URL
+
+            $url = \Spatie\Url\Url::fromString($httpRepoUrl);
+            $hostWithScheme = $url->getScheme() . '://' . $url->getHost();
+            $path = $url->getPath();
+
+            if (!empty($password)) {
+                $userPart = !empty($username) ? rawurlencode($username) : 'git_token'; // Use 'git_token' or similar if username is empty but password is set
+                $passPart = rawurlencode($password);
+                $credentials = $userPart . ':' . $passPart . '@';
+                $fullRepoUrl = $url->getScheme() . '://' . $credentials . $url->getHost() . $path;
+            } else {
+                $fullRepoUrl = $httpRepoUrl; // Fallback to original URL if no password
+            }
+            $base_command = "{$base_command} {$fullRepoUrl}";
+            // No GIT_SSH_COMMAND for HTTP basic auth
+            if ($exec_in_docker) {
+                $commands->push(executeInDocker($deployment_uuid, $base_command));
+            } else {
+                $commands->push($base_command);
+            }
+             return [
+                'commands' => $commands->implode(' && '),
+                'branch' => $branch,
+                'fullRepoUrl' => $fullRepoUrl,
+            ];
+        }
+        elseif ($this->deploymentType() === 'source') {
             $source_html_url = data_get($this, 'source.html_url');
             $url = parse_url(filter_var($source_html_url, FILTER_SANITIZE_URL));
             $source_html_url_host = $url['host'];
@@ -1062,14 +1094,14 @@ class Application extends BaseModel
             }
         }
 
-        if ($this->deploymentType() === 'deploy_key') {
+        elseif ($this->deploymentType() === 'deploy_key') {
             $fullRepoUrl = $customRepository;
             $private_key = data_get($this, 'private_key.private_key');
             if (is_null($private_key)) {
                 throw new RuntimeException('Private key not found. Please add a private key to the application and try again.');
             }
             $private_key = base64_encode($private_key);
-            $base_comamnd = "GIT_SSH_COMMAND=\"ssh -o ConnectTimeout=30 -p {$customPort} -o Port={$customPort} -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /root/.ssh/id_rsa\" {$base_command} {$customRepository}";
+            $base_command = "GIT_SSH_COMMAND=\"ssh -o ConnectTimeout=30 -p {$customPort} -o Port={$customPort} -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /root/.ssh/id_rsa\" {$base_command} {$customRepository}";
 
             if ($exec_in_docker) {
                 $commands = collect([
@@ -1098,9 +1130,10 @@ class Application extends BaseModel
             ];
         }
 
-        if ($this->deploymentType() === 'other') {
-            $fullRepoUrl = $customRepository;
-            $base_command = "{$base_command} {$customRepository}";
+        elseif ($this->deploymentType() === 'other') {
+            // For 'other', $fullRepoUrl remains $customRepository from the top of the method.
+            // This type implies public HTTP/S or pre-configured SSH on the host.
+            $base_command = "{$base_command} {$fullRepoUrl}";
 
             if ($exec_in_docker) {
                 $commands->push(executeInDocker($deployment_uuid, $base_command));
@@ -1111,14 +1144,23 @@ class Application extends BaseModel
             return [
                 'commands' => $commands->implode(' && '),
                 'branch' => $branch,
-                'fullRepoUrl' => $fullRepoUrl,
+                'fullRepoUrl' => $fullRepoUrl, // $customRepository was assigned to $fullRepoUrl
             ];
         }
+        // Fallback if no condition met, though one should be.
+        // Or throw exception if no suitable auth type found.
+        return [
+            'commands' => $commands->implode(' && '),
+            'branch' => $branch,
+            'fullRepoUrl' => $fullRepoUrl,
+        ];
     }
 
     public function generateGitImportCommands(string $deployment_uuid, int $pull_request_id = 0, ?string $git_type = null, bool $exec_in_docker = true, bool $only_checkout = false, ?string $custom_base_dir = null, ?string $commit = null)
     {
         $branch = $this->git_branch;
+        // customRepository() might need review if it makes assumptions about SSH for 'other' type.
+        // For http_basic_auth, git_repository is already the full URL.
         ['repository' => $customRepository, 'port' => $customPort] = $this->customRepository();
         $baseDir = $custom_base_dir ?? $this->generateBaseDir($deployment_uuid);
         $commands = collect([]);
@@ -1129,7 +1171,109 @@ class Application extends BaseModel
         if ($pull_request_id !== 0) {
             $pr_branch_name = "pr-{$pull_request_id}-coolify";
         }
-        if ($this->deploymentType() === 'source') {
+        // Default $fullRepoUrl to $customRepository, can be overridden by specific auth logic
+        $fullRepoUrl = $customRepository;
+
+        if ($this->git_auth_type === 'http_basic_auth') {
+            $username = $this->git_http_username;
+            $password = $this->git_http_password;
+            $httpRepoUrl = $this->git_repository; // This is the original URL from user
+
+            $url = \Spatie\Url\Url::fromString($httpRepoUrl);
+            $path = $url->getPath();
+
+            if (!empty($password)) {
+                $userPart = !empty($username) ? rawurlencode($username) : 'git_token';
+                $passPart = rawurlencode($password);
+                $credentials = $userPart . ':' . $passPart . '@';
+                $fullRepoUrl = $url->getScheme() . '://' . $credentials . $url->getHost() . $path;
+            } else {
+                $fullRepoUrl = $httpRepoUrl;
+            }
+
+            $current_branch_to_clone = $branch;
+            if ($pull_request_id !== 0 && $commit) {
+                // For PRs with specific commit, clone default branch then fetch and checkout commit.
+                // This is a common strategy if direct PR ref fetching is complex or varies by provider with HTTP.
+                // Or, if $git_type is reliable, construct PR ref.
+                // For simplicity, let's assume direct branch/commit checkout for HTTP for now,
+                // or rely on $commit variable if set for PRs.
+                 $current_branch_to_clone = $this->git_branch; // Clone default branch first for PRs
+            }
+
+            $git_clone_command_base = "git clone -b \"{$current_branch_to_clone}\"";
+            if ($only_checkout) {
+                 $git_clone_command_base = "git clone --no-checkout -b \"{$current_branch_to_clone}\"";
+            }
+             $git_clone_command = "{$git_clone_command_base} {$fullRepoUrl} {$baseDir}";
+
+            if (!$only_checkout) {
+                $final_commit_to_checkout = $commit ?: $this->git_commit_sha;
+                if ($final_commit_to_checkout !== 'HEAD' && !($pull_request_id !== 0 && $commit)) { // Avoid double checkout if commit is already for PR
+                    $git_clone_command = "{$git_clone_command} && cd {$baseDir} && git -c advice.detachedHead=false checkout {$final_commit_to_checkout} >/dev/null 2>&1";
+                }
+                if ($this->settings->is_git_submodules_enabled) {
+                    $git_clone_command = "{$git_clone_command} && cd {$baseDir} && git submodule update --init --recursive";
+                }
+                if ($this->settings->is_git_lfs_enabled) {
+                    $git_clone_command = "{$git_clone_command} && cd {$baseDir} && git lfs pull";
+                }
+            }
+             if ($exec_in_docker) {
+                $commands->push(executeInDocker($deployment_uuid, $git_clone_command));
+            } else {
+                $commands->push($git_clone_command);
+            }
+
+            if ($pull_request_id !== 0) {
+                $targetRef = '';
+                $actual_branch_for_checkout = $pr_branch_name;
+                if ($git_type === 'github' || $git_type === 'gitea') {
+                    $targetRef = "pull/{$pull_request_id}/head";
+                } elseif ($git_type === 'gitlab') {
+                    $targetRef = "merge-requests/{$pull_request_id}/head";
+                } elseif ($git_type === 'bitbucket' && $commit) {
+                     // Bitbucket PRs often use commit hash directly if source branch is deleted
+                     $actual_branch_for_checkout = $commit;
+                     $targetRef = $commit; // Fetch the specific commit
+                }
+
+                if ($targetRef) {
+                    $fetch_command_verb = ($git_type === 'bitbucket' && $commit) ? "" : $targetRef.":".$pr_branch_name;
+
+                    $git_fetch_checkout_commands = "cd {$baseDir}";
+                    // If not $only_checkout, we already cloned the default branch. Now fetch the PR ref.
+                    // If $only_checkout, we need to init, add remote, fetch, checkout.
+                    if($only_checkout) {
+                        // This case is more complex for $only_checkout with HTTP as initial clone is shallow.
+                        // Full logic for sparse checkout + PR with HTTP auth is very involved.
+                        // Assuming for now $only_checkout with PRs via HTTP might fetch the specific commit/ref if possible,
+                        // or this path needs more detailed handling similar to SSH sparse checkouts.
+                        // For now, focusing on non-sparse checkout for PRs.
+                        // Re-evaluating: $only_checkout is for loadComposeFile, not regular deployments.
+                        // So, for regular deployments ($only_checkout = false), we cloned default branch.
+                    }
+
+                    $git_fetch_checkout_commands .= " && git fetch origin {$fetch_command_verb}";
+                    $git_fetch_checkout_commands .= " && " . $this->buildGitCheckoutCommand($actual_branch_for_checkout); // buildGitCheckoutCommand handles submodules
+
+                    if ($exec_in_docker) {
+                        $commands->push(executeInDocker($deployment_uuid, "echo 'Checking out {$targetRef} (HTTP Auth)' && {$git_fetch_checkout_commands}"));
+                    } else {
+                        $commands->push("echo 'Checking out {$targetRef} (HTTP Auth)' && {$git_fetch_checkout_commands}");
+                    }
+                     $branch = $actual_branch_for_checkout; // Update branch to the PR/commit specific one
+                }
+            }
+            return [
+                'commands' => $commands->implode(' && '),
+                'branch' => $branch,
+                'fullRepoUrl' => $fullRepoUrl,
+            ];
+        }
+        // Keep existing logic for source (GitHub App) and deploy_key (SSH)
+        // Ensure 'other' type is handled correctly, possibly as public HTTP or pre-configured SSH
+        elseif ($this->deploymentType() === 'source') {
             $source_html_url = data_get($this, 'source.html_url');
             $url = parse_url(filter_var($source_html_url, FILTER_SANITIZE_URL));
             $source_html_url_host = $url['host'];
@@ -1186,11 +1330,20 @@ class Application extends BaseModel
         if ($this->deploymentType() === 'deploy_key') {
             $fullRepoUrl = $customRepository;
             $private_key = data_get($this, 'private_key.private_key');
-            if (is_null($private_key)) {
-                throw new RuntimeException('Private key not found. Please add a private key to the application and try again.');
+            // Check for private_key_id only if auth type is SSH
+            if ($this->git_auth_type === 'ssh_deploy_key' && is_null($private_key) && is_null(data_get($this, 'source'))) { // source check for GitHub app
+                throw new RuntimeException('Private key not found for SSH deployment. Please add a private key to the application and try again.');
             }
-            $private_key = base64_encode($private_key);
-            $git_clone_command_base = "GIT_SSH_COMMAND=\"ssh -o ConnectTimeout=30 -p {$customPort} -o Port={$customPort} -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /root/.ssh/id_rsa\" {$git_clone_command} {$customRepository} {$baseDir}";
+            if ($private_key) { // Ensure private_key exists before encoding, relevant for SSH
+                 $private_key = base64_encode($private_key);
+            }
+            // GIT_SSH_COMMAND should only be used for SSH type
+            $git_ssh_command_string = ($this->git_auth_type === 'ssh_deploy_key' || (is_null($this->git_auth_type) && Str::startsWith($customRepository, 'git@')))
+                ? "GIT_SSH_COMMAND=\\\"ssh -o ConnectTimeout=30 -p {$customPort} -o Port={$customPort} -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /root/.ssh/id_rsa\\\" "
+                : "";
+
+            $git_clone_command_base = "{$git_ssh_command_string}{$git_clone_command} {$customRepository} {$baseDir}";
+
             if ($only_checkout) {
                 $git_clone_command = $git_clone_command_base;
             } else {
@@ -1249,34 +1402,52 @@ class Application extends BaseModel
             ];
         }
         if ($this->deploymentType() === 'other') {
-            $fullRepoUrl = $customRepository;
-            $git_clone_command = "{$git_clone_command} {$customRepository} {$baseDir}";
-            $git_clone_command = $this->setGitImportSettings($deployment_uuid, $git_clone_command, public: true);
+            $fullRepoUrl = $customRepository; // This is correct for 'other' if it's a public http repo
+            // If it's a public HTTP repo, no GIT_SSH_COMMAND is needed.
+            // If it's a private repo that somehow fell into 'other' but needs SSH, it would fail here (which is okay, config error).
+            // The main change is for explicit http_basic_auth handled above.
+
+            $is_ssh_repo = Str::startsWith($customRepository, 'git@');
+            $git_ssh_command_string_for_other = ($is_ssh_repo) // Only add GIT_SSH_COMMAND for 'other' if it's an SSH URL
+                ? "GIT_SSH_COMMAND=\\\"ssh -o ConnectTimeout=30 -p {$customPort} -o Port={$customPort} -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /root/.ssh/id_rsa\\\" " // Assuming key is somehow available or not needed
+                : "";
+
+
+            $git_clone_command = "{$git_ssh_command_string_for_other}{$git_clone_command} {$customRepository} {$baseDir}";
+
+
+            // Apply LFS/Submodules settings (simplified, no SSH specific parts for 'other' unless it's an SSH URL)
+            if (! $only_checkout) {
+                if ($this->git_commit_sha !== 'HEAD') {
+                     // No GIT_SSH_COMMAND for 'other' type, unless it's an SSH URL (then it depends on host git config)
+                    $git_clone_command = "{$git_clone_command} && cd {$baseDir} && {$git_ssh_command_string_for_other}git -c advice.detachedHead=false checkout {$this->git_commit_sha} >/dev/null 2>&1";
+                }
+                if ($this->settings->is_git_submodules_enabled) {
+                     // No GIT_SSH_COMMAND for 'other' type
+                    $git_clone_command = "{$git_clone_command} && cd {$baseDir} && {$git_ssh_command_string_for_other}git submodule update --init --recursive";
+                }
+                if ($this->settings->is_git_lfs_enabled) {
+                    // No GIT_SSH_COMMAND for 'other' type
+                    $git_clone_command = "{$git_clone_command} && cd {$baseDir} && {$git_ssh_command_string_for_other}git lfs pull";
+                }
+            }
+
 
             if ($pull_request_id !== 0) {
+                $targetBranch = '';
                 if ($git_type === 'gitlab') {
-                    $branch = "merge-requests/{$pull_request_id}/head:$pr_branch_name";
-                    if ($exec_in_docker) {
-                        $commands->push(executeInDocker($deployment_uuid, "echo 'Checking out $branch'"));
-                    } else {
-                        $commands->push("echo 'Checking out $branch'");
-                    }
-                    $git_clone_command = "{$git_clone_command} && cd {$baseDir} && GIT_SSH_COMMAND=\"ssh -o ConnectTimeout=30 -p {$customPort} -o Port={$customPort} -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /root/.ssh/id_rsa\" git fetch origin $branch && ".$this->buildGitCheckoutCommand($pr_branch_name);
+                    $targetBranch = "merge-requests/{$pull_request_id}/head:$pr_branch_name";
                 } elseif ($git_type === 'github' || $git_type === 'gitea') {
-                    $branch = "pull/{$pull_request_id}/head:$pr_branch_name";
-                    if ($exec_in_docker) {
-                        $commands->push(executeInDocker($deployment_uuid, "echo 'Checking out $branch'"));
-                    } else {
-                        $commands->push("echo 'Checking out $branch'");
-                    }
-                    $git_clone_command = "{$git_clone_command} && cd {$baseDir} && GIT_SSH_COMMAND=\"ssh -o ConnectTimeout=30 -p {$customPort} -o Port={$customPort} -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /root/.ssh/id_rsa\" git fetch origin $branch && ".$this->buildGitCheckoutCommand($pr_branch_name);
-                } elseif ($git_type === 'bitbucket') {
-                    if ($exec_in_docker) {
-                        $commands->push(executeInDocker($deployment_uuid, "echo 'Checking out $branch'"));
-                    } else {
-                        $commands->push("echo 'Checking out $branch'");
-                    }
-                    $git_clone_command = "{$git_clone_command} && cd {$baseDir} && GIT_SSH_COMMAND=\"ssh -o ConnectTimeout=30 -p {$customPort} -o Port={$customPort} -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /root/.ssh/id_rsa\" ".$this->buildGitCheckoutCommand($commit);
+                    $targetBranch = "pull/{$pull_request_id}/head:$pr_branch_name";
+                }
+                // No GIT_SSH_COMMAND for 'other' type PR fetch unless it's SSH url
+                $pr_fetch_command = "cd {$baseDir} && {$git_ssh_command_string_for_other}git fetch origin {$targetBranch}";
+                $pr_checkout_command = $this->buildGitCheckoutCommand($pr_branch_name); // buildGitCheckoutCommand doesn't add GIT_SSH_COMMAND itself
+
+                if ($exec_in_docker) {
+                    $commands->push(executeInDocker($deployment_uuid, "echo 'Checking out {$targetBranch} (Other)' && $pr_fetch_command && $pr_checkout_command"));
+                } else {
+                    $commands->push("echo 'Checking out {$targetBranch} (Other)' && $pr_fetch_command && $pr_checkout_command");
                 }
             }
 

@@ -23,7 +23,10 @@ class GithubPrivateRepositoryDeployKey extends Component
 
     public $private_keys = [];
 
-    public int $private_key_id;
+    public ?int $private_key_id = null; // Updated type
+    public string $auth_type = 'ssh'; // New property
+    public ?string $http_username = null; // New property
+    public ?string $http_password = null; // New property
 
     public int $port = 3000;
 
@@ -56,17 +59,23 @@ class GithubPrivateRepositoryDeployKey extends Component
     private string $git_repository;
 
     protected $rules = [
-        'repository_url' => 'required',
+        'repository_url' => 'required|url:http,https,ssh',
         'branch' => 'required|string',
         'port' => 'required|numeric',
         'is_static' => 'required|boolean',
         'publish_directory' => 'nullable|string',
         'build_pack' => 'required|string',
+        'auth_type' => 'required|in:ssh,http',
+        'http_username' => 'nullable|string|required_if:auth_type,http',
+        'http_password' => 'nullable|string|required_if:auth_type,http',
     ];
 
     protected $validationAttributes = [
-        'repository_url' => 'Repository',
+        'repository_url' => 'Repository URL',
         'branch' => 'Branch',
+        'auth_type' => 'Authentication Type',
+        'http_username' => 'HTTP Username',
+        'http_password' => 'HTTP Password/Token',
         'port' => 'Port',
         'is_static' => 'Is static',
         'publish_directory' => 'Publish directory',
@@ -116,7 +125,31 @@ class GithubPrivateRepositoryDeployKey extends Component
     public function setPrivateKey($private_key_id)
     {
         $this->private_key_id = $private_key_id;
+        $this->auth_type = 'ssh';
+        $this->http_username = null;
+        $this->http_password = null;
         $this->current_step = 'repository';
+    }
+
+    public function setAuthType(string $type)
+    {
+        $this->auth_type = $type;
+        if ($type === 'ssh') {
+            $this->http_username = null;
+            $this->http_password = null;
+            if (is_null($this->private_key_id) && PrivateKey::where('team_id', currentTeam()->id)->count() > 0) {
+                $this->current_step = 'private_keys';
+            } else if (PrivateKey::where('team_id', currentTeam()->id)->where('id', '!=', 0)->count() === 0) {
+                $this->dispatch('error', 'No private keys found. Please add a private key first to use SSH authentication.');
+                $this->current_step = 'private_keys';
+            } else {
+                 $this->current_step = 'repository';
+            }
+        } elseif ($type === 'http') {
+            $this->private_key_id = null;
+            $this->current_step = 'repository';
+        }
+        $this->dispatch('authTypeChanged');
     }
 
     public function submit()
@@ -137,35 +170,43 @@ class GithubPrivateRepositoryDeployKey extends Component
 
             $project = Project::where('uuid', $this->parameters['project_uuid'])->first();
             $environment = $project->load(['environments'])->environments->where('uuid', $this->parameters['environment_uuid'])->first();
-            if ($this->git_source === 'other') {
-                $application_init = [
-                    'name' => generate_random_name(),
-                    'git_repository' => $this->git_repository,
-                    'git_branch' => $this->branch,
-                    'build_pack' => $this->build_pack,
-                    'ports_exposes' => $this->port,
-                    'publish_directory' => $this->publish_directory,
-                    'environment_id' => $environment->id,
-                    'destination_id' => $destination->id,
-                    'destination_type' => $destination_class,
-                    'private_key_id' => $this->private_key_id,
-                ];
-            } else {
-                $application_init = [
-                    'name' => generate_random_name(),
-                    'git_repository' => $this->git_repository,
-                    'git_branch' => $this->branch,
-                    'build_pack' => $this->build_pack,
-                    'ports_exposes' => $this->port,
-                    'publish_directory' => $this->publish_directory,
-                    'environment_id' => $environment->id,
-                    'destination_id' => $destination->id,
-                    'destination_type' => $destination_class,
-                    'private_key_id' => $this->private_key_id,
-                    'source_id' => $this->git_source->id,
-                    'source_type' => $this->git_source->getMorphClass(),
-                ];
+
+            $application_init = [
+                'name' => generate_random_name(),
+                'git_repository' => $this->git_repository,
+                'git_branch' => $this->branch,
+                'build_pack' => $this->build_pack,
+                'ports_exposes' => $this->port,
+                'publish_directory' => $this->publish_directory,
+                'environment_id' => $environment->id,
+                'destination_id' => $destination->id,
+                'destination_type' => $destination_class,
+            ];
+
+            if ($this->auth_type === 'http') {
+                $application_init['git_auth_type'] = 'http_basic_auth';
+                $application_init['git_http_username'] = $this->http_username;
+                $application_init['git_http_password'] = $this->http_password;
+                $application_init['private_key_id'] = null;
+                // For 'other' git_source (which is typical for HTTP basic auth)
+                $application_init['source_id'] = null;
+                $application_init['source_type'] = null;
+            } elseif ($this->auth_type === 'ssh') {
+                $application_init['git_auth_type'] = 'ssh_deploy_key';
+                $application_init['private_key_id'] = $this->private_key_id;
+                $application_init['git_http_username'] = null;
+                $application_init['git_http_password'] = null;
+
+                if ($this->git_source instanceof \App\Models\GithubApp || $this->git_source instanceof \App\Models\GitlabApp) {
+                    $application_init['source_id'] = $this->git_source->id;
+                    $application_init['source_type'] = $this->git_source->getMorphClass();
+                } else {
+                    // For 'other' SSH sources
+                    $application_init['source_id'] = null;
+                    $application_init['source_type'] = null;
+                }
             }
+
             if ($this->build_pack === 'dockerfile' || $this->build_pack === 'dockerimage') {
                 $application_init['health_check_enabled'] = false;
             }
@@ -194,22 +235,61 @@ class GithubPrivateRepositoryDeployKey extends Component
 
     private function get_git_source()
     {
-        $this->repository_url_parsed = Url::fromString($this->repository_url);
+        if (empty($this->repository_url)) {
+            return $this->dispatch('error', 'Repository URL cannot be empty.');
+        }
+        try {
+            $this->repository_url_parsed = Url::fromString($this->repository_url);
+        } catch (\Exception $e) {
+             return $this->dispatch('error', 'Invalid Repository URL format.');
+        }
         $this->git_host = $this->repository_url_parsed->getHost();
+
+        if ($this->auth_type === 'http') {
+            $this->git_repository = (string)$this->repository_url_parsed;
+            $this->git_source = 'other';
+            return;
+        }
+
+        // SSH Auth Logic
         $this->git_repository = $this->repository_url_parsed->getSegment(1).'/'.$this->repository_url_parsed->getSegment(2);
 
         if ($this->git_host === 'github.com') {
             $this->git_source = GithubApp::where('name', 'Public GitHub')->first();
-
+            if ($this->private_key_id) {
+                $key = PrivateKey::find($this->private_key_id);
+                // If a private key is used, it's not a public GitHub App source unless the key itself is tied to one (which is not the current model)
+                // So, if a key is present, it implies a specific setup, not the generic "Public GitHub" app.
+                // We'll consider it 'other' for SSH if a key is involved and it's not mapping to a specific registered GitHub App via the key.
+                // This part might need refinement based on how PrivateKey relates to specific GithubApp instances.
+                // For now, if a key is used, it's not the generic "Public GitHub" source.
+                if ($key) { // A private key is selected
+                    // Check if this key is specifically for a registered GitHub App (if model supports this)
+                    // if ($key->githubApp) { $this->git_source = $key->githubApp; } else ...
+                    // Assuming a generic deploy key is used, not tied to a specific GH App instance
+                     $this->git_source = 'other';
+                }
+            }
             return;
         }
+
+        // For non-GitHub SSH (GitLab, other custom hosts)
         if (str($this->repository_url)->startsWith('http')) {
-            $this->git_host = $this->repository_url_parsed->getHost();
-            $this->git_repository = $this->repository_url_parsed->getSegment(1).'/'.$this->repository_url_parsed->getSegment(2);
-            $this->git_repository = Str::finish("git@$this->git_host:$this->git_repository", '.git');
+            // Convert HTTP-looking URLs to git@host:path.git for SSH cloning
+            // This part might be contentious if user provides HTTP URL but intends to use SSH key for a non-GitHub host
+            // For now, assume if auth_type is SSH and URL is HTTP, it's for a system that allows SSH via HTTP-like URLs, or it's a misconfiguration.
+            // The most common case for SSH is git@... style URLs.
+            $path = ltrim($this->repository_url_parsed->getPath(), '/');
+            $this->git_repository = Str::finish("git@{$this->git_host}:{$path}", '.git');
         } else {
+            // Assumes it's already an SSH URL like git@custom.com:user/repo.git
             $this->git_repository = $this->repository_url;
         }
-        $this->git_source = 'other';
+        $this->git_source = 'other'; // Default for non-GitHub SSH
+        // Similar logic for GitlabApp if a private key can be associated with one
+        // if ($this->private_key_id) {
+        //    $key = PrivateKey::find($this->private_key_id);
+        //    if ($key && $key->gitlabApp) { $this->git_source = $key->gitlabApp; }
+        // }
     }
 }

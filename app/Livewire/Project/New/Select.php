@@ -114,6 +114,12 @@ class Select extends Component
                 'description' => 'You can deploy private repositories with a deploy key.',
                 'logo' => asset('svgs/git.svg'),
             ],
+            [
+                'id' => 'http-git-repository',
+                'name' => 'Private Repository (Git - HTTP/S)',
+                'description' => 'Deploy private Git repositories using HTTP/S basic authentication (username/password or token).',
+                'logo' => asset('svgs/git.svg'),
+            ],
         ];
         $dockerBasedApplications = [
             [

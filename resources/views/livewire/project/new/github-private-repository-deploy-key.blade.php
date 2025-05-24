@@ -1,11 +1,28 @@
 <div>
     <h1>Create a new Application</h1>
-    <div class="pb-4">Deploy any public or private Git repositories through a Deploy Key.</div>
+    <div class="pb-4">Deploy any public or private Git repository via SSH Deploy Key or HTTP/S Basic Authentication.</div>
+
+    <div class="pb-4">
+        <label class="label">Authentication Method:</label>
+        <div class="flex gap-2">
+            <label class="flex items-center gap-1 cursor-pointer">
+                <input wire:model.live="auth_type" type="radio" value="ssh" name="auth_type_radio" />
+                SSH Deploy Key
+            </label>
+            <label class="flex items-center gap-1 cursor-pointer">
+                <input wire:model.live="auth_type" type="radio" value="http" name="auth_type_radio" />
+                HTTP/S Basic Auth / Token
+            </label>
+        </div>
+        @error('auth_type') <span class="text-red-500 error">{{ $message }}</span> @enderror
+    </div>
+
     <div class="flex flex-col pt-4">
-        @if ($current_step === 'private_keys')
-            <h2 class="pb-4">Select a private key</h2>
-            <div class="flex flex-col justify-center gap-2 text-left ">
-                @forelse ($private_keys as $key)
+        @if ($auth_type === 'ssh')
+            @if ($current_step === 'private_keys')
+                <h2 class="pb-4">Select a private key</h2>
+                <div class="flex flex-col justify-center gap-2 text-left ">
+                    @forelse ($private_keys as $key)
                     @if ($private_key_id == $key->id)
                         <div class="gap-2 py-4 cursor-pointer group hover:bg-coollabs bg-coolgray-200 box"
                             wire:click="setPrivateKey('{{ $key->id }}')" wire:key="{{ $key->id }}">
@@ -33,22 +50,30 @@
                             </div>
                         </div>
                     @endif
-                @empty
-                    <div class="flex flex-col items-center justify-center gap-2">
-                        <div>
-                            No private keys found.
+                    @empty
+                        <div class="flex flex-col items-center justify-center gap-2">
+                            <div>
+                                No private keys found.
+                            </div>
+                            <a href="{{ route('security.private-key.index') }}">
+                                <x-forms.button>Create a new private key</x-forms.button>
+                            </a>
                         </div>
-                        <a href="{{ route('security.private-key.index') }}">
-                            <x-forms.button>Create a new private key</x-forms.button>
-                        </a>
-                    </div>
-                @endforelse
-            </div>
+                    @endforelse
+                </div>
+            @endif
         @endif
         @if ($current_step === 'repository')
-            <h2 class="pb-4">Select a repository</h2>
+            <h2 class="pb-4">Repository Details</h2>
             <form class="flex flex-col gap-2 pt-2" wire:submit='submit'>
-                <x-forms.input id="repository_url" required label="Repository Url (https:// or git@)" />
+                <x-forms.input id="repository_url" required label="Repository URL (SSH or HTTP/S)" helper="Use SSH (git@...) or HTTP/S (https://...) format."/>
+                @if ($auth_type === 'http')
+                    <x-forms.input id="http_username" label="Username (optional)" type="text" wire:model.defer="http_username" helper="Username for HTTP basic authentication. Leave blank if using a token as password or for anonymous public repos." />
+                    @error('http_username') <span class="text-red-500 error">{{ $message }}</span> @enderror
+
+                    <x-forms.input id="http_password" label="Password / Token (optional)" type="password" wire:model.defer="http_password" helper="Password or Personal Access Token for HTTP basic authentication. Required if username is set or for private repositories." />
+                    @error('http_password') <span class="text-red-500 error">{{ $message }}</span> @enderror
+                @endif
                 <div class="flex gap-2">
                     <x-forms.input id="branch" required label="Branch" />
                     <x-forms.select wire:model.live="build_pack" label="Build Pack" required>
